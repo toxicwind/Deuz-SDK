@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cell-files explorer</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#262d36; --txt:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --warn:#d29922; --bad:#f85149; --ok:#3fb950; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--txt); font:14px/1.5 system-ui,sans-serif; margin:0; padding:20px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:26px 0 10px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .sub { color:var(--dim); margin-bottom:16px; }
+  .cards { display:flex; gap:10px; flex-wrap:wrap; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; min-width:120px; }
+  .card b { display:block; font-size:20px; }
+  .card span { color:var(--dim); font-size:12px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:900px){ .grid{grid-template-columns:1fr;} }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .bar-row { display:flex; align-items:center; gap:8px; margin:4px 0; font-size:13px; }
+  .bar-row code { min-width:110px; color:var(--acc); }
+  .bar { height:8px; background:var(--line); border-radius:4px; flex:1; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--acc); border-radius:4px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); }
+  td { padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  td.path { font-family:monospace; word-break:break-all; }
+  .score { display:inline-block; min-width:44px; text-align:right; font-weight:700; }
+  .sbar { height:6px; background:var(--line); border-radius:3px; margin-top:3px; width:90px; }
+  .sbar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg,var(--warn),var(--bad)); }
+  .chip { display:inline-block; background:#1f2a3a; color:var(--acc); border-radius:10px; padding:1px 8px; font-size:11px; margin:1px 2px; }
+  .reason { color:var(--dim); font-size:12px; }
+  .qform { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .qform input { background:var(--bg); border:1px solid var(--line); color:var(--txt); border-radius:6px; padding:7px 10px; font-size:13px; }
+  .qform button { background:var(--acc); color:#04121f; border:0; border-radius:6px; padding:7px 16px; font-weight:700; cursor:pointer; }
+  #live { position:fixed; top:10px; right:14px; font-size:12px; color:var(--dim); }
+  #live i { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ok); margin-right:6px; animation:pulse 2s infinite; }
+  @keyframes pulse { 50% { opacity:.4; } }
+</style>
+</head>
+<body>
+<div id="live"><i></i>live · hot-reload armed</div>
+<h1>🦋 cell-files explorer</h1>
+<div class="sub" id="sub">loading…</div>
+
+<h2>Profile</h2>
+<div class="cards" id="cards"></div>
+
+<div class="grid">
+  <div><h2>Top extensions by count</h2><div class="panel" id="extCount"></div></div>
+  <div><h2>Top extensions by bytes</h2><div class="panel" id="extBytes"></div></div>
+</div>
+
+<h2>Anomaly audit <span class="reason">— ranked by corroborated score</span></h2>
+<div class="panel">
+  <div class="qform">
+    <input id="afilter" placeholder="filter path…" style="flex:1;min-width:200px">
+    <button onclick="loadAudit()">refresh</button>
+  </div>
+  <div style="max-height:480px;overflow:auto">
+  <table><thead><tr><th>score</th><th>path</th><th>audits</th><th>detail</th></tr></thead>
+  <tbody id="auditRows"></tbody></table>
+  </div>
+</div>
+
+<div class="grid">
+  <div>
+    <h2>Query</h2>
+    <div class="panel">
+      <div class="qform">
+        <input id="qext" placeholder="ext (e.g. env)" size="8">
+        <input id="qname" placeholder="name contains">
+        <input id="qparent" placeholder="parent contains">
+        <input id="qmin" placeholder="min bytes" size="10">
+        <button onclick="runQuery()">search</button>
+      </div>
+      <div id="qcount" class="reason"></div>
+      <div style="max-height:380px;overflow:auto"><table>
+        <thead><tr><th>path</th><th>size</th><th>mode</th></tr></thead>
+        <tbody id="qrows"></tbody></table></div>
+    </div>
+  </div>
+  <div>
+    <h2>Largest files</h2>
+    <div class="panel"><div style="max-height:420px;overflow:auto"><table>
+      <thead><tr><th>path</th><th>size</th></tr></thead>
+      <tbody id="topRows"></tbody></table></div></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmtB = b => b>=1e9 ? (b/1e9).toFixed(1)+' GB' : b>=1e6 ? (b/1e6).toFixed(1)+' MB' : b>=1e3 ? Math.round(b/1e3)+' KB' : b+' B';
+const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function init() {
+  const p = await (await fetch('/api/profile')).json();
+  $('sub').textContent = `${p.rows.toLocaleString()} files · ${fmtB(p.totalBytes)} · cell-files-20260930`;
+  $('cards').innerHTML = [
+    [p.rows.toLocaleString(),'files'], [fmtB(p.totalBytes),'total size'],
+    [p.hidden,'hidden'], [p.symlinks,'symlinks'],
+    [p.nonAscii,'non-ascii names'], [p.empty,'empty files'],
+  ].map(([b,s]) => `<div class="card"><b>${b}</b><span>${s}</span></div>`).join('');
+  const mx1 = Math.max(...p.byCount.map(x=>x.count));
+  $('extCount').innerHTML = p.byCount.map(x =>
+    `<div class="bar-row"><code>.${esc(x.ext)}</code><div class="bar"><i style="width:${(x.count/mx1*100).toFixed(1)}%"></i></div>${x.count.toLocaleString()}</div>`).join('');
+  const mx2 = Math.max(...p.byBytes.map(x=>x.bytes));
+  $('extBytes').innerHTML = p.byBytes.map(x =>
+    `<div class="bar-row"><code>.${esc(x.ext)}</code><div class="bar"><i style="width:${(x.bytes/mx2*100).toFixed(1)}%"></i></div>${fmtB(x.bytes)}</div>`).join('');
+  const t = await (await fetch('/api/top?limit=25')).json();
+  $('topRows').innerHTML = t.map(r =>
+    `<tr><td class="path">${esc(r.path)}</td><td>${fmtB(r.size)}</td></tr>`).join('');
+  loadAudit();
+}
+
+let auditData = [];
+async function loadAudit() {
+  auditData = await (await fetch('/api/audit?limit=60')).json();
+  renderAudit();
+}
+function renderAudit() {
+  const f = $('afilter').value.toLowerCase();
+  $('auditRows').innerHTML = auditData.filter(r => !f || r.path.toLowerCase().includes(f)).map(r =>
+    `<tr><td><span class="score">${r.score.toFixed(2)}</span><div class="sbar"><i style="width:${(r.score*100).toFixed(0)}%"></i></div></td>` +
+    `<td class="path">${esc(r.path)}</td>` +
+    `<td>${r.audits.map(a=>`<span class="chip">${esc(a)}</span>`).join('')}</td>` +
+    `<td><div>${esc(r.reason)}</div><div class="reason">${fmtB(r.size)} · ${r.mode} · ${r.mtime.slice(0,10)}</div></td></tr>`
+  ).join('');
+}
+$('afilter').addEventListener('input', renderAudit);
+
+async function runQuery() {
+  const q = new URLSearchParams({ ext:$('qext').value, name:$('qname').value, parent:$('qparent').value, minSize:$('qmin').value||'0' });
+  const r = await (await fetch('/api/query?'+q)).json();
+  $('qcount').textContent = `${r.count} files (capped at 200)`;
+  $('qrows').innerHTML = r.files.map(x =>
+    `<tr><td class="path">${esc(x.path)}</td><td>${fmtB(x.size)}</td><td>${x.mode}</td></tr>`).join('');
+}
+
+// hot-reload: server restarts drop this stream -> page refreshes itself
+const es = new EventSource('/api/events');
+es.onerror = () => setTimeout(() => location.reload(), 700);
+init();
+</script>
+</body>
+</html>
