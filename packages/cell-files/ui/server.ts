@@ -37,8 +37,9 @@ function profile() {
   };
 }
 
-const server = Bun.serve({
-  port: PORT,
+const sseClients = new Set<ReadableStreamDefaultController>();
+
+const server = Bun.serve({  port: PORT,
   hostname: "0.0.0.0",
   routes: {
     "/": async () =>
@@ -79,14 +80,17 @@ const server = Bun.serve({
       });
     },
     "/api/events": () => {
-      // SSE heartbeat. bun --hot restarts drop this stream -> client reloads.
+      // SSE hot-reload channel. Two triggers:
+      //  1. bun --hot restarts on server.ts edits -> stream drops -> client reloads.
+      //  2. fs.watch on app.html below -> "reload" broadcast -> client reloads.
       let timer: ReturnType<typeof setInterval>;
       const stream = new ReadableStream({
         start(c) {
+          sseClients.add(c);
           c.enqueue("data: alive\n\n");
           timer = setInterval(() => { try { c.enqueue("data: ping\n\n"); } catch { /* dead */ } }, 15000);
         },
-        cancel() { clearInterval(timer); },
+        cancel(c) { clearInterval(timer); sseClients.delete(c); },
       });
       return new Response(stream, {
         headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
@@ -97,3 +101,14 @@ const server = Bun.serve({
 });
 
 console.log(`[cellfiles-ui] live at http://0.0.0.0:${server.port}/`);
+
+// Watch app.html directly (bun --hot only tracks the module graph, not
+// Bun.file assets): any edit broadcasts a reload to all SSE clients.
+import { watch } from "fs";
+const htmlPath = new URL("./app.html", import.meta.url).pathname;
+watch(htmlPath, () => {
+  console.log("[cellfiles-ui] app.html changed -> reloading clients");
+  for (const c of sseClients) {
+    try { c.enqueue("data: reload\n\n"); } catch { /* dead */ }
+  }
+});

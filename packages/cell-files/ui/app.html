@@ -138,8 +138,9 @@ async function runQuery() {
     `<tr><td class="path">${esc(x.path)}</td><td>${fmtB(x.size)}</td><td>${x.mode}</td></tr>`).join('');
 }
 
-// hot-reload: server restarts drop this stream -> page refreshes itself
+// hot-reload: "reload" broadcast or dropped stream -> refresh the page
 const es = new EventSource('/api/events');
+es.onmessage = e => { if (e.data === 'reload') location.reload(); };
 es.onerror = () => setTimeout(() => location.reload(), 700);
 init();
 </script>
