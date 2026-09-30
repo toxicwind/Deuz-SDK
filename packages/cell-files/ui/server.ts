@@ -1,10 +1,19 @@
 // ui/server.ts — hot-reload web UI for the cell-files explorer.
-// Run:  bun --hot ui/server.ts        (or: mise run up-cellfiles-ui)
-// Edit anything (server or app.html) -> bun --hot restarts -> the page
-// auto-reloads via the /api/events SSE stream. That's the hot-reload loop.
+// Run:  bun --hot ui/server.ts
+//
+// Hot-reload loop (event-driven, no polling):
+//   * The page holds a WebSocket to /api/hmr. On every connect the server
+//     sends {boot, v}; on every (debounced) app.html change it broadcasts
+//     the new {boot, v} to all connected clients.
+//   * bun --hot restarts change `boot`; app.html edits bump `v`.
+//   * The client reloads EXACTLY ONCE when boot changes or v advances —
+//     a bare reconnect (same boot, same v) never reloads.
+//   * Fallback, not rollback: if WebSockets are unavailable the client
+//     degrades to the /api/events SSE stream; if that dies too it parks
+//     with a manual-refresh pill instead of a reload loop.
 import { loadAll, where, groupBy, topGroups, sum, defaultCsvPath, type CellFile } from "../src/dataframe.js";
 import { auditReport } from "../src/ml-audit.js";
-import { existsSync } from "fs";
+import { existsSync, watch } from "fs";
 
 const PORT = Number(process.env.BUN_DEV_PORT ?? 25142);
 const CSV = defaultCsvPath();
@@ -37,10 +46,36 @@ function profile() {
   };
 }
 
-const sseClients = new Set<ReadableStreamDefaultController>();
+const bootId = Math.random().toString(36).slice(2);
+let htmlVersion = 0;
 
-const server = Bun.serve({  port: PORT,
+// Live HMR sockets. Tracked explicitly: broadcast iterates this set, so a
+// dead socket can never wedge the push path (close() always removes it).
+const hmrClients = new Set<import("bun").ServerWebSocket>();
+
+const hmrState = () => JSON.stringify({ boot: bootId, v: htmlVersion });
+
+function broadcastHmr() {
+  const msg = hmrState();
+  for (const ws of hmrClients) {
+    try { ws.send(msg); } catch { /* dead socket; close() cleans up */ }
+  }
+}
+
+const server = Bun.serve({
+  // idleTimeout 0 = disabled. Bun's default 10s idle kill was closing the
+  // long-lived SSE fallback stream, and the old blind-onerror client turned
+  // that into a refresh loop. Both transports here are long-lived by design.
+  idleTimeout: 0,  port: PORT,
   hostname: "0.0.0.0",
+  websocket: {
+    open(ws) {
+      hmrClients.add(ws);
+      ws.send(hmrState()); // handshake: current {boot, v} on every connect
+    },
+    close(ws) { hmrClients.delete(ws); },
+    message() { /* server->client only; client messages ignored */ },
+  },
   routes: {
     "/": async () =>
       new Response(Bun.file(new URL("./app.html", import.meta.url)), {
@@ -79,20 +114,27 @@ const server = Bun.serve({  port: PORT,
         files: out.map((r) => ({ path: r.path, size: r.size, mode: r.mode })),
       });
     },
+    // Primary hot-reload transport: event-driven WebSocket. Pushes happen
+    // only on connect (handshake) and on app.html change (broadcast) —
+    // there is no heartbeat and no polling anywhere in this loop.
+    "/api/hmr": (req, srv) => {
+      if (srv.upgrade(req)) return;
+      return new Response("hot-reload requires websocket", { status: 426 });
+    },
+    // Fallback transport: long-lived SSE, pull-driven via async generator
+    // (manual controller + setInterval enqueues never got flushed by Bun's
+    // response pump). Kept for degraded environments where WebSockets are
+    // unavailable — the client only uses it when /api/hmr fails.
     "/api/events": () => {
-      // SSE hot-reload channel. Two triggers:
-      //  1. bun --hot restarts on server.ts edits -> stream drops -> client reloads.
-      //  2. fs.watch on app.html below -> "reload" broadcast -> client reloads.
-      let timer: ReturnType<typeof setInterval>;
-      const stream = new ReadableStream({
-        start(c) {
-          sseClients.add(c);
-          c.enqueue("data: alive\n\n");
-          timer = setInterval(() => { try { c.enqueue("data: ping\n\n"); } catch { /* dead */ } }, 15000);
-        },
-        cancel(c) { clearInterval(timer); sseClients.delete(c); },
-      });
-      return new Response(stream, {
+      const boot = bootId;
+      async function* sse() {
+        yield `data: {"boot":"${boot}","v":${htmlVersion}}\n\n`;
+        while (true) {
+          await Bun.sleep(5000);
+          yield `data: {"boot":"${boot}","v":${htmlVersion}}\n\n`;
+        }
+      }
+      return new Response(ReadableStream.from(sse()), {
         headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
       });
     },
@@ -100,15 +142,18 @@ const server = Bun.serve({  port: PORT,
   fetch: () => new Response("not found", { status: 404 }),
 });
 
-console.log(`[cellfiles-ui] live at http://0.0.0.0:${server.port}/`);
+console.log(`[cellfiles-ui] live at http://0.0.0.0:${server.port}/ (boot ${bootId})`);
 
 // Watch app.html directly (bun --hot only tracks the module graph, not
-// Bun.file assets): any edit broadcasts a reload to all SSE clients.
-import { watch } from "fs";
+// Bun.file assets). Debounced: one save can fire several fs events.
+// On fire: bump v and push to every connected HMR client, exactly once.
 const htmlPath = new URL("./app.html", import.meta.url).pathname;
+let watchTimer: ReturnType<typeof setTimeout> | null = null;
 watch(htmlPath, () => {
-  console.log("[cellfiles-ui] app.html changed -> reloading clients");
-  for (const c of sseClients) {
-    try { c.enqueue("data: reload\n\n"); } catch { /* dead */ }
-  }
+  if (watchTimer) clearTimeout(watchTimer);
+  watchTimer = setTimeout(() => {
+    htmlVersion++;
+    console.log(`[cellfiles-ui] app.html changed -> v${htmlVersion}, pushing to ${hmrClients.size} hmr client(s)`);
+    broadcastHmr();
+  }, 400);
 });

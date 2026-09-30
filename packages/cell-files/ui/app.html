@@ -138,10 +138,85 @@ async function runQuery() {
     `<tr><td class="path">${esc(x.path)}</td><td>${fmtB(x.size)}</td><td>${x.mode}</td></tr>`).join('');
 }
 
-// hot-reload: "reload" broadcast or dropped stream -> refresh the page
-const es = new EventSource('/api/events');
-es.onmessage = e => { if (e.data === 'reload') location.reload(); };
-es.onerror = () => setTimeout(() => location.reload(), 700);
+// hot-reload, hyper-race style: open the WebSocket (/api/hmr) AND the SSE
+// stream (/api/events) at the same time — first valid {boot, v} handshake
+// wins, the loser is torn down on the spot. No sequential fallback, no
+// timeout-waiting: the fallback is live and racing from t=0.
+// Reload EXACTLY ONCE when boot changes (server restarted via bun --hot)
+// or v advances (app.html edited). A bare reconnect — same boot, same v —
+// never reloads. If the winning transport later dies, re-race; if nothing
+// answers at all, park with a manual-refresh pill instead of any loop.
+let seenBoot = null, seenV = -1;
+function shouldReload(m) {
+  if (!m || typeof m.boot === 'undefined') return false;
+  if (seenBoot === null) { seenBoot = m.boot; seenV = m.v; return false; }
+  return m.boot !== seenBoot || m.v > seenV;
+}
+function liveNote(txt, color) {
+  $('live').innerHTML = '<i style="background:' + color + '"></i>' + txt;
+}
+function manualPill() {
+  liveNote('hot-reload offline — <a href="" onclick="location.reload();return false" style="color:#58a6ff">refresh manually</a>', '#f85149');
+}
+
+function raceHmr() {
+  let settled = false, ws = null, es = null;
+
+  function win(kind, payload) {
+    if (settled) return;
+    settled = true;
+    // tear down the loser immediately — the race is over
+    try { if (kind === 'ws') es.close(); else ws.close(); } catch (e) {}
+    liveNote('live · hot-reload armed (' + kind + ' won)', '#3fb950');
+    try { if (shouldReload(payload)) location.reload(); } catch (e) {}
+    armWinner(kind, kind === 'ws' ? ws : es);
+  }
+
+  // contender 1: WebSocket
+  try {
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/hmr');
+    ws.onmessage = e => { try { win('ws', JSON.parse(e.data)); } catch (err) {} };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    ws.onclose = () => {}; // pre-win death just loses the race quietly
+  } catch (e) { ws = null; }
+
+  // contender 2: SSE
+  try {
+    es = new EventSource('/api/events');
+    es.onmessage = e => { try { win('sse', JSON.parse(e.data)); } catch (err) {} };
+    es.onerror = () => { if (!settled) { try { es.close(); } catch (e) {} } };
+  } catch (e) { es = null; }
+
+  if (!ws && !es) { manualPill(); return; }
+  // safety net: nobody handshakes within 8s -> park, don't spin
+  setTimeout(() => {
+    if (!settled) {
+      settled = true;
+      try { ws.close(); } catch (e) {}
+      try { es.close(); } catch (e) {}
+      manualPill();
+    }
+  }, 8000);
+}
+
+function armWinner(kind, conn) {
+  if (kind === 'ws') {
+    conn.onmessage = e => { try { if (shouldReload(JSON.parse(e.data))) location.reload(); } catch (err) {} };
+    conn.onerror = () => { try { conn.close(); } catch (e) {} };
+    conn.onclose = () => {
+      liveNote('live · re-racing transports…', '#d29922');
+      setTimeout(raceHmr, 1000);
+    };
+  } else {
+    conn.onmessage = e => { try { if (shouldReload(JSON.parse(e.data))) location.reload(); } catch (err) {} };
+    conn.onerror = () => {
+      try { conn.close(); } catch (e) {}
+      liveNote('live · re-racing transports…', '#d29922');
+      setTimeout(raceHmr, 1000);
+    };
+  }
+}
+raceHmr();
 init();
 </script>
 </body>
