@@ -13,6 +13,7 @@
 //     with a manual-refresh pill instead of a reload loop.
 import { loadAll, where, groupBy, topGroups, sum, defaultCsvPath, type CellFile } from "../src/dataframe.js";
 import { auditReport } from "../src/ml-audit.js";
+import { findingsReport } from "../src/findings.js";
 import { existsSync, watch } from "fs";
 
 const PORT = Number(process.env.BUN_DEV_PORT ?? 25142);
@@ -24,6 +25,16 @@ console.log(`[cellfiles-ui] ${rows.length} rows loaded`);
 
 let auditCache: ReturnType<typeof auditReport> | null = null;
 const audit = () => (auditCache ??= auditReport(rows, { exists: existsSync }));
+
+let findingsCache: ReturnType<typeof findingsReport> | null = null;
+const findings = () => (findingsCache ??= findingsReport(rows, { exists: existsSync }));
+
+// Lazy path -> row index for the raw-row drill-through (/api/row).
+let rowIndex: Map<string, CellFile> | null = null;
+const rowByPath = (path: string) => {
+  if (!rowIndex) rowIndex = new Map(rows.map((r) => [r.path, r]));
+  return rowIndex.get(path) ?? null;
+};
 
 function profile() {
   const extGroups = groupBy(rows, (r) => r.ext || "(noext)");
@@ -97,6 +108,24 @@ const server = Bun.serve({
           reason: f.reason, size: f.row.size, mode: f.row.mode, mtime: f.row.mtime,
         })),
       );
+    },
+    // Human findings: 3-class triage (actionable / needs-review / expected),
+    // grouped by directory/workload, every finding carrying a WHY string.
+    // Outlier status is evidence, not verdict. Expected/cache noise is
+    // aggregated into counts — never listed row-by-row on the homepage.
+    "/api/findings": () => Response.json(findings()),
+    // Raw-row drill-through: full 14-column row for one path.
+    "/api/row": (req) => {
+      const path = new URL(req.url).searchParams.get("path") ?? "";
+      const r = rowByPath(path);
+      if (!r) return new Response("no such path", { status: 404 });
+      return Response.json({
+        path: r.path, parent: r.parent, name: r.name, ext: r.ext,
+        size_bytes: r.size, mtime_utc: r.mtime, mode_oct: r.mode,
+        uid: r.uid, gid: r.gid, is_symlink: r.isSymlink,
+        link_target: r.linkTarget, is_hidden: r.isHidden,
+        depth: r.depth, non_ascii: r.nonAscii,
+      });
     },
     "/api/query": (req) => {
       const q = new URL(req.url).searchParams;

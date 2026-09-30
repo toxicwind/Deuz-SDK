@@ -10,6 +10,7 @@
   body { background:var(--bg); color:var(--txt); font:14px/1.5 system-ui,sans-serif; margin:0; padding:20px; }
   h1 { font-size:20px; margin:0 0 4px; }
   h2 { font-size:15px; margin:26px 0 10px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  h3 { font-size:14px; margin:14px 0 6px; display:flex; align-items:center; gap:8px; }
   .sub { color:var(--dim); margin-bottom:16px; }
   .cards { display:flex; gap:10px; flex-wrap:wrap; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; min-width:120px; }
@@ -31,12 +32,33 @@
   .sbar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg,var(--warn),var(--bad)); }
   .chip { display:inline-block; background:#1f2a3a; color:var(--acc); border-radius:10px; padding:1px 8px; font-size:11px; margin:1px 2px; }
   .reason { color:var(--dim); font-size:12px; }
+  .why { font-size:12px; color:var(--txt); margin-top:2px; }
   .qform { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
   .qform input { background:var(--bg); border:1px solid var(--line); color:var(--txt); border-radius:6px; padding:7px 10px; font-size:13px; }
   .qform button { background:var(--acc); color:#04121f; border:0; border-radius:6px; padding:7px 16px; font-weight:700; cursor:pointer; }
   #live { position:fixed; top:10px; right:14px; font-size:12px; color:var(--dim); }
   #live i { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ok); margin-right:6px; animation:pulse 2s infinite; }
   @keyframes pulse { 50% { opacity:.4; } }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; }
+  .dot-actionable { background:var(--bad); } .dot-needs-review { background:var(--warn); } .dot-expected { background:var(--dim); }
+  .fcount { color:var(--dim); font-weight:400; font-size:12px; }
+  .clsdesc { color:var(--dim); font-size:12px; margin:-2px 0 8px; }
+  .grow { border:1px solid var(--line); border-radius:6px; margin:6px 0; overflow:hidden; }
+  .ghead { display:flex; align-items:center; gap:10px; padding:8px 10px; cursor:pointer; background:#1a212b; }
+  .ghead:hover { background:#1f2733; }
+  .ghead code { color:var(--acc); font-size:12px; word-break:break-all; }
+  .ghead .wl { color:var(--dim); font-size:11px; }
+  .ghead .n { margin-left:auto; color:var(--dim); font-size:12px; white-space:nowrap; }
+  .gbody { display:none; padding:4px 6px 8px; }
+  .grow.open .gbody { display:block; }
+  .gsample { font-family:monospace; font-size:12px; color:var(--dim); padding:2px 10px; word-break:break-all; }
+  .browselink { color:var(--acc); cursor:pointer; font-size:12px; }
+  #modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:50; }
+  #modal .box { background:var(--panel); border:1px solid var(--line); border-radius:10px; max-width:720px; margin:8vh auto; padding:18px 20px; max-height:80vh; overflow:auto; }
+  #modal h3 { margin-top:0; }
+  #modalClose { float:right; background:var(--line); color:var(--txt); border:0; border-radius:6px; padding:4px 12px; cursor:pointer; }
+  .rawpath { font-family:monospace; color:var(--acc); cursor:pointer; }
+  .rawpath:hover { text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -52,16 +74,13 @@
   <div><h2>Top extensions by bytes</h2><div class="panel" id="extBytes"></div></div>
 </div>
 
-<h2>Anomaly audit <span class="reason">— ranked by corroborated score</span></h2>
+<h2>Findings <span class="reason">— outlier status is evidence, not verdict</span></h2>
 <div class="panel">
   <div class="qform">
-    <input id="afilter" placeholder="filter path…" style="flex:1;min-width:200px">
-    <button onclick="loadAudit()">refresh</button>
+    <input id="ffilter" placeholder="filter path…" style="flex:1;min-width:200px">
+    <button onclick="loadFindings()">refresh</button>
   </div>
-  <div style="max-height:480px;overflow:auto">
-  <table><thead><tr><th>score</th><th>path</th><th>audits</th><th>detail</th></tr></thead>
-  <tbody id="auditRows"></tbody></table>
-  </div>
+  <div id="findingsClasses"><span class="reason">loading findings…</span></div>
 </div>
 
 <div class="grid">
@@ -89,10 +108,16 @@
   </div>
 </div>
 
+<div id="modal"><div class="box">
+  <button id="modalClose" onclick="closeRaw()">close</button>
+  <h3>raw row</h3>
+  <div id="modalBody"><span class="reason">loading…</span></div>
+</div></div>
+
 <script>
 const $ = id => document.getElementById(id);
 const fmtB = b => b>=1e9 ? (b/1e9).toFixed(1)+' GB' : b>=1e6 ? (b/1e6).toFixed(1)+' MB' : b>=1e3 ? Math.round(b/1e3)+' KB' : b+' B';
-const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 async function init() {
   const p = await (await fetch('/api/profile')).json();
@@ -111,31 +136,88 @@ async function init() {
   const t = await (await fetch('/api/top?limit=25')).json();
   $('topRows').innerHTML = t.map(r =>
     `<tr><td class="path">${esc(r.path)}</td><td>${fmtB(r.size)}</td></tr>`).join('');
-  loadAudit();
+  loadFindings();
 }
 
-let auditData = [];
-async function loadAudit() {
-  auditData = await (await fetch('/api/audit?limit=60')).json();
-  renderAudit();
+// ---- findings triage: 3 classes, grouped by directory/workload ----
+const CLASS_META = {
+  'actionable':   { label:'Actionable',    desc:'Direct security signal — these deserve a human look.' },
+  'needs-review': { label:'Needs review',  desc:'Statistical outliers — evidence, not verdict. Most will turn out benign.' },
+  'expected':     { label:'Expected / cache behavior', desc:'Routine cache, vendor, and testdata noise — aggregated into counts, not listed.' },
+};
+let findingsData = null;
+
+async function loadFindings() {
+  findingsData = await (await fetch('/api/findings')).json();
+  renderFindings();
 }
-function renderAudit() {
-  const f = $('afilter').value.toLowerCase();
-  $('auditRows').innerHTML = auditData.filter(r => !f || r.path.toLowerCase().includes(f)).map(r =>
-    `<tr><td><span class="score">${r.score.toFixed(2)}</span><div class="sbar"><i style="width:${(r.score*100).toFixed(0)}%"></i></div></td>` +
-    `<td class="path">${esc(r.path)}</td>` +
-    `<td>${r.audits.map(a=>`<span class="chip">${esc(a)}</span>`).join('')}</td>` +
-    `<td><div>${esc(r.reason)}</div><div class="reason">${fmtB(r.size)} · ${r.mode} · ${r.mtime.slice(0,10)}</div></td></tr>`
-  ).join('');
+
+function findingRow(f) {
+  return `<tr><td><span class="score">${f.score.toFixed(2)}</span><div class="sbar"><i style="width:${(f.score*100).toFixed(0)}%"></i></div></td>` +
+    `<td class="path"><span class="rawpath" onclick="openRaw('${esc(f.row.path).replace(/'/g,"\\'")}')">${esc(f.row.path)}</span></td>` +
+    `<td>${f.audits.map(a=>`<span class="chip">${esc(a)}</span>`).join('')}</td>` +
+    `<td><div class="why">${esc(f.why)}</div><div class="reason">${fmtB(f.row.size)} · ${esc(f.row.mode)} · ${String(f.row.mtime).slice(0,10)}</div></td></tr>`;
 }
-$('afilter').addEventListener('input', renderAudit);
+
+function renderFindings() {
+  const q = $('ffilter').value.toLowerCase();
+  const match = f => !q || f.row.path.toLowerCase().includes(q);
+  $('findingsClasses').innerHTML = ['actionable','needs-review','expected'].map(cls => {
+    const meta = CLASS_META[cls];
+    const c = findingsData.classes[cls];
+    const groups = c.groups.map((g, gi) => {
+      const items = (g.findings || []).filter(match);
+      const samples = (g.sample || []).filter(match);
+      if (cls !== 'expected' && !items.length) return '';
+      const maxN = Math.max(...c.groups.map(x => x.count), 1);
+      let body;
+      if (cls === 'expected') {
+        body = samples.map(s => `<div class="gsample">e.g. ${esc(s.row.path)}</div>`).join('') +
+          `<div class="gsample"><span class="browselink" onclick="browseDir('${esc(g.dir).replace(/'/g,"\\'")}')">browse all ${g.count.toLocaleString()} in Query →</span></div>`;
+      } else {
+        body = `<table><thead><tr><th>score</th><th>path</th><th>audits</th><th>why flagged</th></tr></thead><tbody>` +
+          items.map(findingRow).join('') + `</tbody></table>` +
+          (g.count > items.length ? `<div class="reason" style="padding:4px 10px">showing ${items.length} of ${g.count.toLocaleString()} — refine with the Query panel</div>` : '');
+      }
+      return `<div class="grow" id="g-${cls}-${gi}">` +
+        `<div class="ghead" onclick="document.getElementById('g-${cls}-${gi}').classList.toggle('open')">` +
+        `<span class="wl">${esc(g.workload)}</span><code>${esc(g.dir)}</code>` +
+        `<div class="bar" style="max-width:160px"><i style="width:${(g.count/maxN*100).toFixed(1)}%"></i></div>` +
+        `<span class="n">${g.count.toLocaleString()}</span></div>` +
+        `<div class="gbody">${body}</div></div>`;
+    }).join('');
+    return `<h3><span class="dot dot-${cls}"></span>${meta.label} <span class="fcount">${c.count.toLocaleString()} findings</span></h3>` +
+      `<div class="clsdesc">${meta.desc}</div>${groups || '<div class="reason">none match the filter</div>'}`;
+  }).join('');
+}
+$('ffilter').addEventListener('input', renderFindings);
+
+function browseDir(dir) {
+  $('qparent').value = dir;
+  runQuery();
+  document.querySelector('#qparent').scrollIntoView({ behavior:'smooth', block:'center' });
+}
+
+async function openRaw(path) {
+  $('modal').style.display = 'block';
+  $('modalBody').innerHTML = '<span class="reason">loading…</span>';
+  try {
+    const r = await (await fetch('/api/row?path=' + encodeURIComponent(path))).json();
+    $('modalBody').innerHTML = '<table><tbody>' + Object.entries(r).map(([k,v]) =>
+      `<tr><td style="color:var(--dim)">${esc(k)}</td><td class="path">${esc(String(v))}</td></tr>`).join('') + '</tbody></table>';
+  } catch (e) {
+    $('modalBody').innerHTML = '<span class="reason">failed to load raw row</span>';
+  }
+}
+function closeRaw() { $('modal').style.display = 'none'; }
+$('modal').addEventListener('click', e => { if (e.target.id === 'modal') closeRaw(); });
 
 async function runQuery() {
   const q = new URLSearchParams({ ext:$('qext').value, name:$('qname').value, parent:$('qparent').value, minSize:$('qmin').value||'0' });
   const r = await (await fetch('/api/query?'+q)).json();
   $('qcount').textContent = `${r.count} files (capped at 200)`;
   $('qrows').innerHTML = r.files.map(x =>
-    `<tr><td class="path">${esc(x.path)}</td><td>${fmtB(x.size)}</td><td>${x.mode}</td></tr>`).join('');
+    `<tr><td class="path"><span class="rawpath" onclick="openRaw('${esc(x.path).replace(/'/g,"\\'")}')">${esc(x.path)}</span></td><td>${fmtB(x.size)}</td><td>${x.mode}</td></tr>`).join('');
 }
 
 // hot-reload, hyper-race style: open the WebSocket (/api/hmr) AND the SSE
